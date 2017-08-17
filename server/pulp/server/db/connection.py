@@ -7,6 +7,8 @@ import ssl
 import time
 from gettext import gettext as _
 
+from multiprocessing.util import register_after_fork
+
 import mongoengine
 
 # in mongoengine 0.11 ConnectionError was renamed to MongoEngineConnectionError
@@ -39,7 +41,7 @@ MONGO_WRITE_CONCERN_VERSION = semantic_version.Version("2.6.0")
 _logger = logging.getLogger(__name__)
 
 
-def initialize(name=None, seeds=None, max_pool_size=None, replica_set=None, max_timeout=32):
+def initialize(name=None, seeds=None, max_pool_size=None, replica_set=None, max_timeout=32, is_parent=True):
     """
     Initialize the connection pool and top-level database for pulp. Calling this more than once will
     raise a RuntimeError.
@@ -168,11 +170,25 @@ def initialize(name=None, seeds=None, max_pool_size=None, replica_set=None, max_
         # Query the collection names to ensure that we are authenticated properly
         _logger.debug(_('Querying the database to validate the connection.'))
         _DATABASE.collection_names()
+
+        # Connection will need to be re-initialized in any child processes.
+        # (child processes themselves don't need to register_after_fork
+        # as they'll retain the handler set up by the parent.)
+        if is_parent:
+            kwargs = dict(name=name, seeds=seeds, max_pool_size=max_pool_size,
+                          replica_set=replica_set, max_timeout=max_timeout)
+            register_after_fork(_reinitialize, lambda fn: fn(**kwargs))
+
     except Exception, e:
         _logger.critical(_('Database initialization failed: %s') % str(e))
         _CONNECTION = None
         _DATABASE = None
         raise
+
+
+def _reinitialize(**kwargs):
+    _logger.info("Resetting mongo connection after fork")
+    initialize(is_parent=False, **kwargs)
 
 
 def _connect_to_one_of_seeds(connection_kwargs, seeds_list, db_name):
